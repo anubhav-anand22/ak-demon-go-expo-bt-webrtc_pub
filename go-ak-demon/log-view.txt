@@ -1,0 +1,3 @@
+sudo journalctl -u ble-bridge.service -f -a
+
+systemctl status ble-bridge.service

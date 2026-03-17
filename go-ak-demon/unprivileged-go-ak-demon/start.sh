@@ -1,0 +1,1 @@
+cd unprivileged-solidjs-ak-demon/ && npm run build && cd .. && go run main.go

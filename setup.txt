@@ -1,0 +1,3 @@
+Set home dir in privileged main.go
+
+Set UUID and CharUUID in both expo app and go privileged app
