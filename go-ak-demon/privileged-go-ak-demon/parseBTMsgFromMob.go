@@ -25,6 +25,10 @@ type WebRTCICEFromMob struct {
 	Type    string          `json:"type"`
 	Payload json.RawMessage `json:"payload"`
 }
+type BTPubKeyExchangeFromMob struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
 
 func ParseBTMsgFromMob(jsonData []byte) (msg any, err error, defaulted bool) {
 	var base BaseBTMsgType
@@ -54,6 +58,12 @@ func ParseBTMsgFromMob(jsonData []byte) (msg any, err error, defaulted bool) {
 		return target, nil, false
 	case "WEBRTC_ICE":
 		var target WebRTCICEFromMob
+		if err := json.Unmarshal(jsonData, &target); err != nil {
+			return nil, err, false
+		}
+		return target, nil, false
+	case "BT_PUB_KEY_EXCHANGE_FROM_MOB":
+		var target BTPubKeyExchangeFromMob
 		if err := json.Unmarshal(jsonData, &target); err != nil {
 			return nil, err, false
 		}

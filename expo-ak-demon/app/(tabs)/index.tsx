@@ -1,15 +1,65 @@
-import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { Image } from "expo-image";
+import { Platform, StyleSheet, Text, View } from "react-native";
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import { HelloWave } from "@/components/hello-wave";
+import ParallaxScrollView from "@/components/parallax-scroll-view";
+import { ThemedText } from "@/components/themed-text";
+import { ThemedView } from "@/components/themed-view";
+import { Link } from "expo-router";
+import { useBTConnection } from "@/hooks/useBTConnection";
+import { useEffect, useMemo } from "react";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useTheme } from "@/hooks/useTheme";
+import { Color } from "@/constants/theme";
+import StartBTAndRTCHome from "@/components/StartBTAndRTCHome";
+import { useWebRTCConnection } from "@/hooks/useWebRTCConnection";
+import {} from "expo-device";
 
 export default function HomeScreen() {
+  const btConnectionState = useBTConnection();
+  const { isDataChannelReady, rtcEncStatus, rtcStatus } = useWebRTCConnection();
+  const { colors } = useTheme();
+
+  const style = useMemo(() => getStyle(colors), [colors]);
+
+  useEffect(() => {
+    console.log({ btConnectionState, isDataChannelReady, rtcEncStatus, rtcStatus });
+  }, [btConnectionState, isDataChannelReady, rtcEncStatus, rtcStatus]);
+
   return (
-    <ParallaxScrollView
+    <SafeAreaView style={{ flex: 1, backgroundColor: colors.background }}>
+      {btConnectionState !== "CONNECTED" ||
+      !isDataChannelReady ||
+      rtcEncStatus !== "SET" ||
+      rtcStatus !== "CONNECTED" ? (
+        <StartBTAndRTCHome
+          btConnectionState={btConnectionState}
+          colors={colors}
+          isDataChannelReady={isDataChannelReady}
+          rtcEncStatus={rtcEncStatus}
+          rtcStatus={rtcStatus}
+        />
+      ) : (
+        <>
+          <View>
+            <Text style={style.txt}>Ok</Text>
+          </View>
+        </>
+      )}
+    </SafeAreaView>
+  );
+}
+
+const getStyle = (colors: Color) => {
+  return StyleSheet.create({
+    txt: {
+      color: colors.text,
+    },
+  });
+};
+
+/*
+<ParallaxScrollView
       headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
       headerImage={
         <Image
@@ -75,24 +125,4 @@ export default function HomeScreen() {
         </ThemedText>
       </ThemedView>
     </ParallaxScrollView>
-  );
-}
-
-const styles = StyleSheet.create({
-  titleContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
-  },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
-  },
-});
+*/

@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
+	"math/big"
 	"path/filepath"
 	"time"
 
@@ -24,11 +27,10 @@ import (
 )
 
 var (
-	// Upgrader for WebSockets
 	upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true }, // Relax for development
+		CheckOrigin: func(r *http.Request) bool { return true },
 	}
-	// Connection to the privileged socket
+
 	privConn net.Conn
 	mu       sync.Mutex
 
@@ -36,6 +38,10 @@ var (
 	wsMutex          sync.Mutex
 	dataChannel      *webrtc.DataChannel
 	dataChannelMutex sync.Mutex
+
+	chunkBuffer      = make(map[string][][]byte)
+	chunkBufferMutex sync.Mutex
+	cryptoHandler    *lib.CryptoHandler
 )
 
 var peerConnection *webrtc.PeerConnection
@@ -45,11 +51,9 @@ func main() {
 	logFilePath := filepath.Join(homeDir, ".ak-demon", "unprivileged", "unprivileged_app.log")
 	f, _ := os.Create(logFilePath)
 
-	// Set Gin to log to both the file and standard output
 	gin.DefaultWriter = io.MultiWriter(f, os.Stdout)
 	log.SetOutput(io.MultiWriter(f, os.Stdout))
 	log.SetPrefix("[UNPRIVILEGED] ")
-	// log.Println("Worker started and connected to Unix socket")
 
 	log.Printf("Staring...")
 
@@ -57,7 +61,6 @@ func main() {
 	log.Printf("Resolved HomeDir: %s", homeDir)
 	log.Printf("Target File Path: %s", filepath.Join(homeDir, ".ak-demon", "unprivileged", "pub", "front", "index.html"))
 
-	// 1. Connect to the Privileged socket first
 	var err error
 	privConn, err = net.Dial("unix", "/var/run/ble_bridge.sock")
 	if err != nil {
@@ -67,7 +70,6 @@ func main() {
 
 	go listenToPrivileged()
 
-	// 2. Setup Gin
 	r := gin.Default()
 
 	r.GET("/ws", func(c *gin.Context) {
@@ -112,7 +114,7 @@ func main() {
 		r.NoRoute(func(ctx *gin.Context) {
 
 			ctx.File(filepath.Join(pubDirPath, "front", "index.html"))
-			// ctx.File("./pub/front/index.html")
+
 		})
 	}
 
@@ -132,7 +134,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	wsMutex.Unlock()
 
 	defer func() {
-		// Clean up the connection when the client disconnects
+
 		wsMutex.Lock()
 		for i, v := range activeWebSockets {
 			if v == ws {
@@ -144,7 +146,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		ws.Close()
 	}()
 
-	// Listen for messages from SolidJS
 	for {
 		_, message, err := ws.ReadMessage()
 		if err != nil {
@@ -152,9 +153,6 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 
 		msg, err, defaulted := lib.ParseFrontendMsgJson(message)
-
-		// log.Printf("%s", string(message))
-		// ws.WriteMessage(websocket.TextMessage, []byte("hello"))
 
 		if defaulted {
 			log.Printf("Error: No msg type found %s", message)
@@ -166,20 +164,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Test msg from frontend via websocket %s", m.Type)
 		case lib.TestMstToPriTypeMsg:
 			log.Printf("Test msg from frontend to privileged app %s", m.Type)
-			mu.Lock()
-			privConn.SetDeadline(time.Now().Add(5 * time.Second))
-			privConn.Write(append(message, '\n'))
-			resp, _ := bufio.NewReader(privConn).ReadString('\n')
-			mu.Unlock()
-			ws.WriteMessage(websocket.TextMessage, []byte(resp))
+			SendToPrivileged(message)
 		case lib.TestMstToMobBtTypeMsg:
 			log.Printf("Test msg from frontend to mob via BT %s", m.Type)
-			mu.Lock()
-			privConn.SetDeadline(time.Now().Add(5 * time.Second))
-			privConn.Write(append(message, '\n'))
-			resp, _ := bufio.NewReader(privConn).ReadString('\n')
-			mu.Unlock()
-			ws.WriteMessage(websocket.TextMessage, []byte(resp))
+			SendToPrivileged(message)
+
 		}
 	}
 }
@@ -188,10 +177,8 @@ func SendToPrivileged(jsonData []byte) error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	// Ensure there are no lingering deadlines that would block the write
 	privConn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 
-	// Ensure the payload has exactly one newline at the end
 	payload := append(jsonData, '\n')
 
 	_, err := privConn.Write(payload)
@@ -203,7 +190,7 @@ func SendToPrivileged(jsonData []byte) error {
 }
 
 func listenToPrivileged() {
-	// Remove read deadlines so the scanner can block infinitely waiting for BLE data
+
 	privConn.SetReadDeadline(time.Time{})
 
 	scanner := bufio.NewScanner(privConn)
@@ -251,18 +238,23 @@ func listenToPrivileged() {
 }
 
 func handleWebRTCOffer(payload json.RawMessage) {
+	var err error = nil
+	cryptoHandler, err = lib.NewCryptoHandler()
+
 	var offer webrtc.SessionDescription
 	if err := json.Unmarshal(payload, &offer); err != nil {
 		log.Printf("Failed to parse offer: %v", err)
 		return
 	}
 
-	// 2. Setup Pion WebRTC configuration
 	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}},
+		ICEServers: []webrtc.ICEServer{{URLs: []string{"stun:stun.l.google.com:19302"}}, {
+			URLs:       []string{"turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"},
+			Username:   "openrelayproject",
+			Credential: "openrelayproject",
+		}},
 	}
 
-	// Close existing connection if renegotiating
 	if peerConnection != nil {
 		peerConnection.Close()
 	}
@@ -273,7 +265,6 @@ func handleWebRTCOffer(payload json.RawMessage) {
 	}
 	peerConnection = pc
 
-	// 3. Setup a DataChannel so we can test the connection!
 	pc.OnDataChannel(func(d *webrtc.DataChannel) {
 		log.Printf("New DataChannel: %s", d.Label())
 		dataChannelMutex.Lock()
@@ -296,14 +287,57 @@ func handleWebRTCOffer(payload json.RawMessage) {
 			log.Print(parsedMsg)
 
 			switch v := parsedMsg.(type) {
-			case lib.BaseRTCTestMsgType:
-				log.Print("TEST msg via rtc")
-			case lib.PingRTCMsgType:
-				log.Printf("PING msg via rtc, val: %s", v.Payload)
-			case lib.TimeUpdateRTCMsgType:
-				log.Printf("Time update msg via rtc, time: %d", v.Payload)
+			case lib.ChunkedPayloadMsg:
+				decryptedChunk, err := cryptoHandler.DecryptBytes(v.Nonce, v.Data)
+				if err != nil {
+					log.Printf("Failed to decrypt secure chunk %d: %v", v.Index, err)
+					return
+				}
+
+				chunkBufferMutex.Lock()
+
+				if _, exists := chunkBuffer[v.ID]; !exists {
+					// Initialize the 2D byte array to hold 'Total' number of chunks
+					chunkBuffer[v.ID] = make([][]byte, v.Total)
+				}
+
+				chunkBuffer[v.ID][v.Index] = decryptedChunk
+
+				isComplete := true
+				for _, c := range chunkBuffer[v.ID] {
+					if c == nil {
+						isComplete = false
+						break
+					}
+				}
+
+				if isComplete {
+					log.Printf("All %d chunks received for ID %s. Reassembling...", v.Total, v.ID)
+
+					var fullBytes []byte
+					for _, c := range chunkBuffer[v.ID] {
+						fullBytes = append(fullBytes, c...)
+					}
+
+					delete(chunkBuffer, v.ID)
+					chunkBufferMutex.Unlock()
+
+					finalMsg, finalErr, finalDef := lib.ParseRTCMsgReceived(fullBytes)
+					if finalErr == nil && !finalDef {
+						handleCompleteRTCMessage(finalMsg)
+					} else {
+						log.Printf("Reassembled JSON parse error: %v", finalErr)
+					}
+
+				} else {
+					chunkBufferMutex.Unlock()
+				}
+
+			default:
+				handleCompleteRTCMessage(parsedMsg)
+
 			}
-			// d.SendText("Hello from Go WebRTC!") // Echo back
+
 		})
 		d.OnClose(func() {
 			dataChannelMutex.Lock()
@@ -315,43 +349,65 @@ func handleWebRTCOffer(payload json.RawMessage) {
 			dataChannel = nil
 			dataChannelMutex.Unlock()
 		})
+		d.OnOpen(func() {
+			log.Printf("Got data channel sending pub key")
+			pubKeyMsg := lib.PeerPubKeyMsg{
+				Type: "PEER_PUB_KEY",
+				Key:  cryptoHandler.GetMyPublicKeyBase64(),
+			}
+			SendSmallMsgToMobUnEnc(pubKeyMsg, d)
+		})
 	})
 
-	// 4. Send our ICE Candidates back to React Native via BLE as they are gathered
 	pc.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
 			candidateJSON, _ := json.Marshal(c.ToJSON())
 			reply := []byte(`{"type": "WEBRTC_ICE", "payload": ` + string(candidateJSON) + `}`)
-			SendToPrivileged(reply) // Sends to Unix Socket -> Privileged -> BLE TX
+			SendToPrivileged(reply)
 		}
 	})
 
-	// 5. Apply the Offer
 	if err := pc.SetRemoteDescription(offer); err != nil {
 		log.Printf("Failed to set remote description: %v", err)
 	} else {
 		log.Printf("Set remote description via received offer")
 	}
 
-	// 6. Create the Answer
 	answer, err := pc.CreateAnswer(nil)
 	if err != nil {
 		log.Printf("Failed to create answer: %v", err)
 	}
 
-	// 7. Apply our Answer locally
 	if err := pc.SetLocalDescription(answer); err != nil {
 		log.Printf("Failed to set local description: %v", err)
 	} else {
 		log.Printf("Successfully set local description using answer generated")
 	}
 
-	// 8. Send the Answer back to Mobile via BLE!
 	answerJSON, _ := json.Marshal(answer)
 	reply := []byte(`{"type": "WEBRTC_ANSWER", "payload": ` + string(answerJSON) + `}`)
 	SendToPrivileged(reply)
 
 	log.Println("Sent WebRTC Answer via BLE")
+}
+
+func handleCompleteRTCMessage(parsedMsg any) {
+	switch v := parsedMsg.(type) {
+	case lib.BaseRTCTestMsgType:
+		log.Print("TEST msg via rtc")
+	case lib.PingRTCMsgType:
+		log.Printf("PING msg via rtc, val: %s", v.Payload)
+	case lib.TimeUpdateRTCMsgType:
+		log.Printf("Time update msg via rtc, time: %d", v.Payload)
+	case lib.PeerPubKeyMsg:
+		cryptoHandler.SetPeerPublicKey(v.Key)
+		pubKeyMsg := lib.BaseRTCMsgType{
+			Type: "PEER_PUB_KEY_SET_SUCCESS",
+		}
+		SendSmallMsgToMobUnEnc(pubKeyMsg, dataChannel)
+	default:
+		log.Printf("Received complete message of unknown type: %T", v)
+	}
 }
 
 func handleWebRTCICE(payload json.RawMessage) {
@@ -368,4 +424,83 @@ func handleWebRTCICE(payload json.RawMessage) {
 	} else {
 		log.Printf("Successfully added ICE candidate")
 	}
+}
+
+func SendSmallMsgToMobUnEnc(msg any, dc *webrtc.DataChannel) error {
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+		return fmt.Errorf("cannot send small message, channel not open")
+	}
+	jsonBytes, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal msg: %w", err)
+	}
+	if err := dc.SendText(string(jsonBytes)); err != nil {
+		return fmt.Errorf("failed to send small msg %w", err)
+	}
+	return nil
+}
+
+func SendLargeMsgToMob(msg any, dc *webrtc.DataChannel) error {
+	if dc == nil || dc.ReadyState() != webrtc.DataChannelStateOpen {
+		return fmt.Errorf("cannot send large message, channel not open")
+	}
+	if cryptoHandler == nil || !cryptoHandler.IsReady() { // Assuming you add an IsReady() check to your Go handler!
+		return fmt.Errorf("E2E Encryption not ready")
+	}
+
+	jsonBytes, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal msg: %w", err)
+	}
+
+	const CHUNK_SIZE = 10240 // 10 KB to stay safely under WebRTC limits
+	totalChunks := (len(jsonBytes) + CHUNK_SIZE - 1) / CHUNK_SIZE
+
+	// Generate a random ID for this transmission envelope
+	randNum, _ := rand.Int(rand.Reader, big.NewInt(1000000))
+	messageId := fmt.Sprintf("go-%d", randNum)
+
+	log.Printf("Starting secure transmission to Mobile: %d bytes over %d chunks.", len(jsonBytes), totalChunks)
+
+	for i := 0; i < totalChunks; i++ {
+		start := i * CHUNK_SIZE
+		end := start + CHUNK_SIZE
+		if end > len(jsonBytes) {
+			end = len(jsonBytes)
+		}
+
+		// 1. Slice the raw bytes
+		chunkBytes := jsonBytes[start:end]
+
+		// 2. Encrypt the chunk
+		encData, err := cryptoHandler.EncryptBytes(chunkBytes)
+		if err != nil {
+			return fmt.Errorf("encryption failed on chunk %d: %w", i, err)
+		}
+
+		// 3. Create the envelope
+		envelope := lib.ChunkedPayloadMsg{
+			Type:  "CHUNKED_PAYLOAD",
+			ID:    messageId,
+			Total: totalChunks,
+			Index: i,
+			Nonce: encData.Nonce,
+			Data:  encData.Ciphertext,
+		}
+
+		envBytes, _ := json.Marshal(envelope)
+
+		// 4. Send via WebRTC
+		if err := dc.SendText(string(envBytes)); err != nil {
+			return fmt.Errorf("failed to send chunk %d: %w", i, err)
+		}
+
+		// 5. Prevent WebRTC SCTP buffer overflow
+		if i%10 == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+
+	log.Printf("Secure transmission complete! ID: %s", messageId)
+	return nil
 }

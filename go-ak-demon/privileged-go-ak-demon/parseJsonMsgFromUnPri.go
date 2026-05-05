@@ -18,6 +18,15 @@ type TestMstToPriTypeMsg struct {
 type TestMstToMobBtTypeMsg struct {
 	Type string `json:"type"`
 }
+type WebRTCAnswerFromUnpri struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type WebRTCICEFromUnpri struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
+}
 
 func ParseJsonMsgFromUnPri(jsonData []byte) (msg any, err error, defaulted bool) {
 	var base BaseType
@@ -44,7 +53,18 @@ func ParseJsonMsgFromUnPri(jsonData []byte) (msg any, err error, defaulted bool)
 			return nil, err, false
 		}
 		return target, nil, false
-
+	case "WEBRTC_ANSWER":
+		var target WebRTCAnswerFromUnpri
+		if err := json.Unmarshal(jsonData, &target); err != nil {
+			return nil, err, false
+		}
+		return target, nil, false
+	case "WEBRTC_ICE":
+		var target WebRTCICEFromUnpri
+		if err := json.Unmarshal(jsonData, &target); err != nil {
+			return nil, err, false
+		}
+		return target, nil, false
 	default:
 		return nil, fmt.Errorf("unknown type: %s", base.Type), true
 	}
